@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from web3 import Web3
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
@@ -7,7 +7,12 @@ import os
 from datetime import datetime
 import json
 from fastapi.responses import JSONResponse
+import logging
 
+logging.basicConfig(
+    level=logging.INFO,  
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 app = FastAPI()
 
@@ -30,51 +35,64 @@ collection = db[MONGO_COLLECTION]
 
 
 def get_token_balance(wallet: str):
-    # Connect to the Ethereum Node
-    web3 = Web3(Web3.HTTPProvider(ETHEREUM_RPC_URL))
-    # Get token balance using web3py
-    # Token contract address ABI are needed here
+    try:
+        # Connect to the Ethereum Node
+        web3 = Web3(Web3.HTTPProvider(ETHEREUM_RPC_URL))
+        # Get token balance using web3py
+        # Token contract address ABI are needed here
 
-    token_contract = web3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
-    return token_contract.functions.balanceOf(wallet).call() // 10 ** 18
+        token_contract = web3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+        return (token_contract.functions.balanceOf(wallet).call(), int(token_contract.functions.decimals().call()))
+    except Exception as e:
+        logging.error(f"Error getting token balance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 def get_token_price (currency: str):
-
-    # Here we get token price in USD using CoinGecko
-    token_price_response = requests.get(f"{COINGECKO_API_URL}simple/price",params={"ids": TOKEN_ID, "vs_currencies": currency})
-    return token_price_response.json()[TOKEN_ID]["usd"] 
-
+    try:
+        # Here we get token price in USD using CoinGecko
+        token_price_response = requests.get(f"{COINGECKO_API_URL}simple/price",params={"ids": TOKEN_ID, "vs_currencies": currency})
+        return token_price_response.json()[TOKEN_ID]["usd"] 
+    except Exception as e:
+        logging.error(f"Error getting token price: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/get_balance")
 def get_balance(wallet: str):
-    
-    token_balance = get_token_balance(wallet)
-    token_price_usd = get_token_price("usd")
+    try: 
+        token_balance, decimals = get_token_balance(wallet)
+        token_price_usd = get_token_price("usd")
 
-    # Here we calculate token balance in USD
-    token_balance_usd = round(token_balance * token_price_usd, 2)
+        # Here we calculate token balance in USD
+        token_balance_usd = round((token_balance * token_price_usd) // decimals, 2)
 
-    # Here we save the data to MongoDB
-    current_time = datetime.now().isoformat()
+        # Here we save the data to MongoDB
+        current_time = datetime.now().isoformat()
 
-    current = collection.insert_one({
-        "wallet": wallet, 
-        "last_update_time": current_time, 
-        "current_balance": token_balance,
-        "current_balance_usd": token_balance_usd
-    })
+        collection.insert_one({
+            "wallet": wallet, 
+            "last_update_time": current_time, 
+            "current_balance": token_balance,
+            "current_balance_usd": token_balance_usd
+        })
 
-    
-    return JSONResponse(content={"wallet": wallet, "token_balance": token_balance, "token_balance_usd": token_balance_usd})
-
+        logging.info(f"Balance retrieved for wallet: {wallet}")
+        return JSONResponse(content={"wallet": wallet, "token_balance": token_balance, "token_balance_usd": token_balance_usd})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error getting balance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/get_history")
 def get_history(wallet: str):
-    history = collection.find({"wallet": wallet})
+    try: 
+        history = collection.find({"wallet": wallet})
 
-    hist_data = list(history)
-    for i in range(len(hist_data)):
-        hist_data[i]['_id'] = str(hist_data[i]['_id'])
+        hist_data = list(history)
+        for i in range(len(hist_data)):
+            hist_data[i]['_id'] = str(hist_data[i]['_id'])
 
-    return JSONResponse(content=hist_data)
+        return JSONResponse(content=hist_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
